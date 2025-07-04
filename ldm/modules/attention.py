@@ -198,16 +198,25 @@ class CrossAttention(nn.Module):
             nn.Dropout(dropout)
         )
 
-    def forward(self, x, context=None, mask=None):
+    def forward(self, x, context=None, mask=None, saliency_map=None):
         h = self.heads
-
         q = self.to_q(x)
         context = default(context, x)
         k = self.to_k(context)
         v = self.to_v(context)
-
+        if (
+            saliency_map is not None
+            and hasattr(k, 'shape') and hasattr(saliency_map, 'shape')
+            and saliency_map.abs().max() > 1e-6
+        ):
+            if saliency_map.dim() == 2:
+                saliency_map = saliency_map.unsqueeze(-1)
+            if saliency_map.shape[0] == k.shape[0] and saliency_map.shape[1] == k.shape[1]:
+                #print(f"[SAL] CrossAttention: saliency_map.shape={saliency_map.shape}, k.shape={k.shape}")
+                saliency_factor = 1 + saliency_map
+                k = k * saliency_factor
+                v = v * saliency_factor
         q, k, v = map(lambda t: rearrange(t, 'b n (h d) -> (b h) n d', h=h), (q, k, v))
-
         sim = einsum('b i d, b j d -> b i j', q, k) * self.scale
 
         if exists(mask):
@@ -216,7 +225,6 @@ class CrossAttention(nn.Module):
             mask = repeat(mask, 'b j -> (b h) () j', h=h)
             sim.masked_fill_(~mask, max_neg_value)
 
-        # attention, what we cannot get enough of
         attn = sim.softmax(dim=-1)
 
         out = einsum('b i j, b j d -> b i d', attn, v)
@@ -243,12 +251,23 @@ class MemoryEfficientCrossAttention(nn.Module):
         self.to_out = nn.Sequential(nn.Linear(inner_dim, query_dim), nn.Dropout(dropout))
         self.attention_op: Optional[Any] = None
 
-    def forward(self, x, context=None, mask=None):
+    def forward(self, x, context=None, mask=None, saliency_map=None):
         q = self.to_q(x)
         context = default(context, x)
         k = self.to_k(context)
         v = self.to_v(context)
-
+        if (
+            saliency_map is not None
+            and hasattr(k, 'shape') and hasattr(saliency_map, 'shape')
+            and saliency_map.abs().max() > 1e-6
+        ):
+            if saliency_map.dim() == 2:
+                saliency_map = saliency_map.unsqueeze(-1)
+            if saliency_map.shape[0] == k.shape[0] and saliency_map.shape[1] == k.shape[1]:
+                #print(f"[SAL] MemoryEfficientCrossAttention: saliency_map.shape={saliency_map.shape}, k.shape={k.shape}")
+                saliency_factor = 1 + saliency_map
+                k = k * saliency_factor
+                v = v * saliency_factor
         b, _, _ = q.shape
         q, k, v = map(
             lambda t: t.unsqueeze(3)
@@ -259,7 +278,6 @@ class MemoryEfficientCrossAttention(nn.Module):
             (q, k, v),
         )
 
-        # actually compute the attention, what we cannot get enough of
         out = xformers.ops.memory_efficient_attention(q, k, v, attn_bias=None, op=self.attention_op)
 
         if exists(mask):
@@ -295,12 +313,14 @@ class BasicTransformerBlock(nn.Module):
         self.norm3 = nn.LayerNorm(dim)
         self.checkpoint = checkpoint
 
-    def forward(self, x, context=None):
-        return checkpoint(self._forward, (x, context), self.parameters(), self.checkpoint)
+    def forward(self, x, context=None, saliency_map=None):
+        if saliency_map is None:
+            saliency_map = torch.zeros((x.shape[0], 1, x.shape[1]), device=x.device, dtype=x.dtype)
+        return checkpoint(self._forward, (x, context, saliency_map), self.parameters(), self.checkpoint)
 
-    def _forward(self, x, context=None):
-        x = self.attn1(self.norm1(x), context=context if self.disable_self_attn else None) + x
-        x = self.attn2(self.norm2(x), context=context) + x
+    def _forward(self, x, context=None, saliency_map=None):
+        x = self.attn1(self.norm1(x), context=context if self.disable_self_attn else None, saliency_map=saliency_map) + x
+        x = self.attn2(self.norm2(x), context=context, saliency_map=saliency_map) + x
         x = self.ff(self.norm3(x)) + x
         return x
 
@@ -317,7 +337,7 @@ class SpatialTransformer(nn.Module):
                  depth=1, dropout=0., context_dim=None,
                  disable_self_attn=False, use_linear=False,
                  use_checkpoint=True):
-        super().__init__()
+        super().__init__()  
         if exists(context_dim) and not isinstance(context_dim, list):
             context_dim = [context_dim]
         self.in_channels = in_channels
@@ -347,21 +367,26 @@ class SpatialTransformer(nn.Module):
             self.proj_out = zero_module(nn.Linear(in_channels, inner_dim))
         self.use_linear = use_linear
 
-    def forward(self, x, context=None):
-        # note: if no context is given, cross-attention defaults to self-attention
+    def forward(self, x, context=None, saliency_map=None):
+        b, c, h, w = x.shape
+        if saliency_map is None:
+            saliency_map = torch.zeros((b, h * w), device=x.device, dtype=x.dtype)
+        else:
+            if saliency_map.dim() == 3 and saliency_map.shape[1] == 1:
+                saliency_map = saliency_map.squeeze(1)
+            if saliency_map.dim() == 4:
+                saliency_map = saliency_map.view(b, -1)
         if not isinstance(context, list):
             context = [context]
-        b, c, h, w = x.shape
         x_in = x
         x = self.norm(x)
         if not self.use_linear:
             x = self.proj_in(x)
-        #  对于图像数据做了一个拉长，将（b,c,h,w）转换成（b,(hw),c）的张量，即将图像数据变成了一个长为hw，维度是c的sequence
         x = rearrange(x, 'b c h w -> b (h w) c').contiguous()
         if self.use_linear:
             x = self.proj_in(x)
         for i, block in enumerate(self.transformer_blocks):
-            x = block(x, context=context[i])
+            x = block(x, context=context[i], saliency_map=saliency_map)
         if self.use_linear:
             x = self.proj_out(x)
         x = rearrange(x, 'b (h w) c -> b c h w', h=h, w=w).contiguous()

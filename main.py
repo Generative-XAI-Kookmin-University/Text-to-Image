@@ -534,6 +534,8 @@ if __name__ == "__main__":
         lightning_config.trainer = trainer_config
         # model
         model = instantiate_from_config(config.model)
+
+        # ------------------------------------------
         # trainer and callbacks
         trainer_kwargs = dict()
         # default logger configs
