@@ -277,12 +277,6 @@ class ResBlock(TimestepBlock):
 
 
 class AttentionBlock(nn.Module):
-    """
-    An attention block that allows spatial positions to attend to each other.
-    Originally ported from here, but adapted to the N-d case.
-    https://github.com/hojonathanho/diffusion/blob/1e0dceb3b3495bbe19116a5e1b3596cd0706c543/diffusion_tf/models/unet.py#L66.
-    """
-
     def __init__(
         self,
         channels,
@@ -290,39 +284,69 @@ class AttentionBlock(nn.Module):
         num_head_channels=-1,
         use_checkpoint=False,
         use_new_attention_order=False,
+        saliency_weight=0.0,
     ):
         super().__init__()
         self.channels = channels
+        print(self.channels)
         if num_head_channels == -1:
             self.num_heads = num_heads
         else:
-            assert (
-                channels % num_head_channels == 0
-            ), f"q,k,v channels {channels} is not divisible by num_head_channels {num_head_channels}"
+            assert channels % num_head_channels == 0, f"q,k,v channels {channels} is not divisible by num_head_channels {num_head_channels}"
             self.num_heads = channels // num_head_channels
         self.use_checkpoint = use_checkpoint
-        self.norm = normalization(channels)
+        self.norm = normalization(self.channels)
         self.qkv = conv_nd(1, channels, channels * 3, 1)
         if use_new_attention_order:
-            # split qkv before split heads
             self.attention = QKVAttention(self.num_heads)
         else:
-            # split heads before split qkv
             self.attention = QKVAttentionLegacy(self.num_heads)
-
         self.proj_out = zero_module(conv_nd(1, channels, channels, 1))
+        self.saliency_weight = saliency_weight
 
-    def forward(self, x):
-        return checkpoint(self._forward, (x,), self.parameters(), True)   # TODO: check checkpoint usage, is True # TODO: fix the .half call!!!
-        #return pt_checkpoint(self._forward, x)  # pytorch
+    def forward(self, x, saliency_map=None):
+        if saliency_map is None:
+            b, _, *spatial = x.shape
+            saliency_map = th.zeros((b, 1, *spatial), device=x.device, dtype=x.dtype)
+        return checkpoint(self._forward, (x, saliency_map), self.parameters(), True)
 
-    def _forward(self, x):
+    def _forward(self, x, saliency_map=None):
         b, c, *spatial = x.shape
-        x = x.reshape(b, c, -1)
-        qkv = self.qkv(self.norm(x))
-        h = self.attention(qkv)
-        h = self.proj_out(h)
-        return (x + h).reshape(b, c, *spatial)
+        #print(f"x shape: {x.shape}")
+        L = np.prod(spatial)
+        x_reshaped = x.reshape(b, c, -1)
+        normed = self.norm(x_reshaped)
+
+        qkv = self.qkv(normed)
+        q, k, v = qkv.chunk(3, dim=1)
+
+        q = q.reshape(b, self.num_heads, -1, L)
+        k = k.reshape(b, self.num_heads, -1, L)
+        v = v.reshape(b, self.num_heads, -1, L)
+
+        if saliency_map is not None:
+            if saliency_map.dim() == 2:
+                saliency_map = saliency_map.unsqueeze(0).unsqueeze(0)
+                saliency_map = saliency_map.expand(b, -1, -1, -1)
+    
+            saliency_resized = F.interpolate(saliency_map, size=spatial, mode="bilinear", align_corners=False)
+            saliency_flat = saliency_resized.view(b, 1, -1)
+            saliency_factor = 1 + self.saliency_weight * saliency_flat
+            saliency_factor = saliency_factor.expand(b, self.num_heads, -1)
+            saliency_factor = saliency_factor.unsqueeze(2)
+            
+            k = k * saliency_factor
+            v = v * saliency_factor
+
+        scale = 1 / math.sqrt(k.shape[2])
+        q = q * scale
+        weight = th.einsum("b h d n, b h d m -> b h n m", q, k)
+        weight = th.softmax(weight, dim=-1)
+        a = th.einsum("b h n m, b h d m -> b h d n", weight, v)
+        a = a.reshape(b, -1, L)
+        a = self.proj_out(a)
+        return (x_reshaped + a).reshape(b, c, *spatial)
+
 
 
 def count_flops_attn(model, _x, y):
@@ -481,6 +505,7 @@ class UNetModel(nn.Module):
         disable_middle_self_attn=False,
         use_linear_in_transformer=False,
         adm_in_channels=None,
+        saliency_weight=0.05,
     ):
         super().__init__()
         if use_spatial_transformer:
@@ -535,6 +560,7 @@ class UNetModel(nn.Module):
         self.num_head_channels = num_head_channels
         self.num_heads_upsample = num_heads_upsample
         self.predict_codebook_ids = n_embed is not None
+        self.saliency_weight = saliency_weight
 
         time_embed_dim = model_channels * 4
         self.time_embed = nn.Sequential(
@@ -756,6 +782,16 @@ class UNetModel(nn.Module):
             conv_nd(dims, model_channels, n_embed, 1),
             #nn.LogSoftmax(dim=1)  # change to cross_entropy and produce non-normalized logits
         )
+        
+        self.pre_spatial_attn = AttentionBlock(
+            ch,
+            num_heads=num_heads if num_heads > 0 else 1,
+            num_head_channels=num_head_channels,
+            use_checkpoint=use_checkpoint,
+            use_new_attention_order=use_new_attention_order,
+            saliency_weight=saliency_weight
+        )
+
 
     def convert_to_fp16(self):
         """
@@ -772,8 +808,10 @@ class UNetModel(nn.Module):
         self.input_blocks.apply(convert_module_to_f32)
         self.middle_block.apply(convert_module_to_f32)
         self.output_blocks.apply(convert_module_to_f32)
+    
 
-    def forward(self, x, timesteps=None, context=None, y=None,**kwargs):
+
+    def forward(self, x, timesteps=None, context=None, y=None, saliency_map=None, **kwargs):
         """
         Apply the model to an input batch.
         :param x: an [N x C x ...] Tensor of inputs.
@@ -793,12 +831,20 @@ class UNetModel(nn.Module):
             assert y.shape[0] == x.shape[0]
             emb = emb + self.label_emb(y)
 
+        #if saliency_map is not None:
+            #x = self.pre_spatial_attn(x, saliency_map=saliency_map)
+
         h = x.type(self.dtype)
-        for module in self.input_blocks:
+        for idx, module in enumerate(self.input_blocks):
             h = module(h, emb, context)
+            if idx == 0 and saliency_map is not None:
+                h = self.pre_spatial_attn(h, saliency_map=saliency_map)
             hs.append(h)
         h = self.middle_block(h, emb, context)
+
         for module in self.output_blocks:
+            #print(f"h shape: {h.shape}")
+            #print(f"hs[-1] shape: {hs[-1].shape}")
             h = th.cat([h, hs.pop()], dim=1)
             h = module(h, emb, context)
         h = h.type(x.dtype)
@@ -1023,4 +1069,3 @@ class EncoderUNetModel(nn.Module):
         else:
             h = h.type(x.dtype)
             return self.out(h)
-

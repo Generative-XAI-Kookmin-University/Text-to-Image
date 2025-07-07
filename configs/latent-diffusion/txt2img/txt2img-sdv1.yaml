@@ -19,6 +19,14 @@ model:
     scale_factor: 0.18215
     use_ema: False
 
+    first_process_steps: 200
+    FH_config:
+      target: Flaw_Highlighter.FlawHighlighter
+      params:
+        ndf: 32
+        nc: 3
+        ckpt_path: "./pretrained/FH_best_30.pth"
+
     unet_config:
       target: ldm.modules.diffusionmodules.openaimodel.UNetModel
       params:

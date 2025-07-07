@@ -52,7 +52,7 @@ def create_coco_txt_files(coco_root_path, split='val2017', num_samples=None):
         print(f"Limited to {num_samples} samples")
     
     # 출력 파일 경로 (data 폴더 안에 생성)
-    data_path = Path('/root/stable-diffusion/data')
+    data_path = Path('/root/coco')
     data_path.mkdir(exist_ok=True)  # data 폴더가 없으면 생성
     images_txt_path = data_path / 'coco_images.txt'
     captions_txt_path = data_path / 'coco_txt.txt'
@@ -87,8 +87,8 @@ def create_coco_txt_files_with_actual_captions(coco_root_path, split='val2017', 
     
     # 경로 설정
     coco_path = Path(coco_root_path)
-    images_path = coco_path / 'images' / split
-    annotations_path = coco_path / 'annotations' / 'annotations' / f'captions_{split}.json'
+    images_path = coco_path / split
+    annotations_path = coco_path / 'annotations' / f'captions_{split}.json'
     
     # annotation 파일 로드
     print(f"Loading annotations from {annotations_path}...")
@@ -125,7 +125,7 @@ def create_coco_txt_files_with_actual_captions(coco_root_path, split='val2017', 
         print(f"Limited to {num_samples} samples")
     
     # 출력 파일 경로 (실제 캡션 버전 - data 폴더 안에 생성)
-    data_path = Path('/root/stable-diffusion/data')
+    data_path = Path('/root/coco')
     data_path.mkdir(exist_ok=True)  # data 폴더가 없으면 생성
     images_txt_path = data_path / 'coco_images_with_captions.txt'
     captions_txt_path = data_path / 'coco_captions_actual.txt'
@@ -134,7 +134,7 @@ def create_coco_txt_files_with_actual_captions(coco_root_path, split='val2017', 
     print(f"Creating {images_txt_path}...")
     with open(images_txt_path, 'w', encoding='utf-8') as f:
         for image_id, filename in valid_images:
-            relative_path = f"../coco/images/{split}/{filename}"
+            relative_path = f"../coco/{split}/{filename}"
             f.write(f"{relative_path}\n")
     
     print(f"Creating {captions_txt_path}...")
@@ -170,4 +170,4 @@ if __name__ == "__main__":
     # create_coco_txt_files(coco_root, split='val2017')
     
     # 전체 training 세트 처리하고 싶다면:
-    create_coco_txt_files_with_actual_captions(coco_root, split='val2017')
+    create_coco_txt_files_with_actual_captions(coco_root, split='train2017')
