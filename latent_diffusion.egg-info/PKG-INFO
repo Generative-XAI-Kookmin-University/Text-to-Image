@@ -1,10 +1,7 @@
-Metadata-Version: 2.1
+Metadata-Version: 2.4
 Name: latent-diffusion
 Version: 0.0.1
-Summary: UNKNOWN
-Home-page: UNKNOWN
-License: UNKNOWN
-Platform: UNKNOWN
-
-UNKNOWN
-
+Requires-Dist: torch
+Requires-Dist: numpy
+Requires-Dist: tqdm
+Dynamic: requires-dist

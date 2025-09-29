@@ -198,7 +198,7 @@ class CrossAttention(nn.Module):
             nn.Dropout(dropout)
         )
 
-    def forward(self, x, context=None, mask=None):
+    def forward(self, x, context=None, mask=None, saliency_map=None, saliency_weight=None):
         h = self.heads
 
         q = self.to_q(x)
@@ -218,6 +218,29 @@ class CrossAttention(nn.Module):
 
         # attention, what we cannot get enough of
         attn = sim.softmax(dim=-1)
+        #print("-----")
+        # Apply saliency map modulation only for self-attention (when context is None or same as x)
+        #print("Here1")
+        if saliency_map is not None and saliency_weight is not None:
+            # For self-attention, apply saliency modulation
+            b_orig = x.shape[0]
+            seq_len = x.shape[1]
+            print("saliency map applied")
+            
+            # Reshape saliency_map to match attention dimensions
+            if len(saliency_map.shape) == 4:  # [N, 1, H, W]
+                h_dim = int(seq_len ** 0.5)  # Assuming square spatial dimensions
+                w_dim = seq_len // h_dim
+                saliency_resized = torch.nn.functional.interpolate(
+                    saliency_map, size=(h_dim, w_dim), mode='bilinear', align_corners=False)
+                saliency_flat = saliency_resized.reshape(b_orig, -1)  # [N, H*W]
+                
+                # Expand for each head: [N, H*W] -> [N*heads, H*W, H*W]
+                saliency_expanded = saliency_flat.unsqueeze(-1).expand(-1, -1, seq_len)  # [N, H*W, H*W]
+                saliency_expanded = saliency_expanded.repeat(h, 1, 1)  # [N*heads, H*W, H*W]
+                
+                # Apply modulation to attention weights
+                attn = attn * (1.0 + saliency_weight * saliency_expanded)
 
         out = einsum('b i j, b j d -> b i d', attn, v)
         out = rearrange(out, '(b h) n d -> b n (h d)', h=h)
@@ -243,7 +266,7 @@ class MemoryEfficientCrossAttention(nn.Module):
         self.to_out = nn.Sequential(nn.Linear(inner_dim, query_dim), nn.Dropout(dropout))
         self.attention_op: Optional[Any] = None
 
-    def forward(self, x, context=None, mask=None):
+    def forward(self, x, context=None, mask=None, saliency_map=None, saliency_weight=None):
         q = self.to_q(x)
         context = default(context, x)
         k = self.to_k(context)
@@ -295,11 +318,16 @@ class BasicTransformerBlock(nn.Module):
         self.norm3 = nn.LayerNorm(dim)
         self.checkpoint = checkpoint
 
-    def forward(self, x, context=None):
-        return checkpoint(self._forward, (x, context), self.parameters(), self.checkpoint)
+    def forward(self, x, context=None, saliency_map=None, saliency_weight=None):
+        return checkpoint(self._forward, (x, context, saliency_map, saliency_weight), self.parameters(), self.checkpoint)
 
-    def _forward(self, x, context=None):
-        x = self.attn1(self.norm1(x), context=context if self.disable_self_attn else None) + x
+    def _forward(self, x, context=None, saliency_map=None, saliency_weight=None):
+        # First attention layer (self-attention with optional saliency modulation)
+        print("attn1")
+        x = self.attn1(self.norm1(x), context=context if self.disable_self_attn else None, #context if self.disable_self_attn else 
+                       saliency_map=saliency_map, saliency_weight=saliency_weight) + x
+        # Second attention layer (cross-attention, no saliency modulation to preserve text conditioning)
+        print("attn2")
         x = self.attn2(self.norm2(x), context=context) + x
         x = self.ff(self.norm3(x)) + x
         return x
@@ -347,7 +375,7 @@ class SpatialTransformer(nn.Module):
             self.proj_out = zero_module(nn.Linear(in_channels, inner_dim))
         self.use_linear = use_linear
 
-    def forward(self, x, context=None):
+    def forward(self, x, context=None, saliency_map=None, saliency_weight=None):
         # note: if no context is given, cross-attention defaults to self-attention
         if not isinstance(context, list):
             context = [context]
@@ -361,7 +389,7 @@ class SpatialTransformer(nn.Module):
         if self.use_linear:
             x = self.proj_in(x)
         for i, block in enumerate(self.transformer_blocks):
-            x = block(x, context=context[i])
+            x = block(x, context=context[i], saliency_map=saliency_map, saliency_weight=saliency_weight)
         if self.use_linear:
             x = self.proj_out(x)
         x = rearrange(x, 'b (h w) c -> b c h w', h=h, w=w).contiguous()

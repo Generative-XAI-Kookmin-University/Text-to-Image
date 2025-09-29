@@ -531,7 +531,7 @@ if __name__ == "__main__":
             print(f"Running on GPUs {gpuinfo}")
             cpu = False
         trainer_opt = argparse.Namespace(**trainer_config)
-        lightning_config.trainer = trainer_config
+        lightning_config.trainer = trainer_config 
         # model
         model = instantiate_from_config(config.model)
         # trainer and callbacks

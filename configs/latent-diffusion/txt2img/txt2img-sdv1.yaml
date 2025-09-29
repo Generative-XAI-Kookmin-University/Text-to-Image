@@ -19,13 +19,13 @@ model:
     scale_factor: 0.18215
     use_ema: False
 
-    first_process_steps: 200
+    first_process_steps: 250000
     FH_config:
       target: Flaw_Highlighter.FlawHighlighter
       params:
         ndf: 32
         nc: 3
-        ckpt_path: "./pretrained/FH_best_30.pth"
+        ckpt_path: "./pretrained/FH_best_11.pth"
 
     unet_config:
       target: ldm.modules.diffusionmodules.openaimodel.UNetModel
@@ -48,7 +48,7 @@ model:
         use_spatial_transformer: true
         transformer_depth: 1
         context_dim: 768 #768 for sd
-        use_checkpoint: True
+        use_checkpoint: False
         legacy: False
 
     first_stage_config:

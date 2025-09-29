@@ -439,8 +439,8 @@ class DDPM(pl.LightningModule):
                     img = torch.clamp(img, 0.0, 1.0)
                     input_tensor = resize(img, [256,256])
                     input_tensor = normalize(input_tensor,
-                                             mean=[0.485,0.456,0.406],
-                                             std=[0.229,0.224,0.225])
+                                            mean=[0.485,0.456,0.406],
+                                            std=[0.229,0.224,0.225])
                     input_tensor = input_tensor.unsqueeze(0).to(self.device)
                     input_tensor.requires_grad = True
                     target_layer = []
