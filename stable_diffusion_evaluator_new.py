@@ -198,7 +198,7 @@ class StableDiffusionEvaluator:
                 if self.save_generated_images:
                     for j in range(bsize):
                         idx = start + j
-                        if idx < 100:
+                        if idx < 10000:
                             img = x_samples[j]
                             img = (img+1)/2
                             arr = (img.permute(1,2,0).cpu().numpy()*255).astype('uint8')
