@@ -225,7 +225,7 @@ class CrossAttention(nn.Module):
             # For self-attention, apply saliency modulation
             b_orig = x.shape[0]
             seq_len = x.shape[1]
-            print("saliency map applied")
+            #print("saliency map applied")
             
             # Reshape saliency_map to match attention dimensions
             if len(saliency_map.shape) == 4:  # [N, 1, H, W]
@@ -323,11 +323,11 @@ class BasicTransformerBlock(nn.Module):
 
     def _forward(self, x, context=None, saliency_map=None, saliency_weight=None):
         # First attention layer (self-attention with optional saliency modulation)
-        print("attn1")
+        #print("attn1")
         x = self.attn1(self.norm1(x), context=context if self.disable_self_attn else None, #context if self.disable_self_attn else 
                        saliency_map=saliency_map, saliency_weight=saliency_weight) + x
         # Second attention layer (cross-attention, no saliency modulation to preserve text conditioning)
-        print("attn2")
+        #print("attn2")
         x = self.attn2(self.norm2(x), context=context) + x
         x = self.ff(self.norm3(x)) + x
         return x

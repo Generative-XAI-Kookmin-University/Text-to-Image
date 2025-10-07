@@ -3,7 +3,7 @@ model:
   target: ldm.models.diffusion.ddpm.LatentDiffusion
   params:
 #    ckpt_path: ./pretrained/v1-5-pruned.ckpt
-#    ckpt_path: stable-diffusion-v1.4/sd-v1-4.ckpt
+    ckpt_path: pretrained/sd-v1-4.ckpt
     linear_start: 0.0015
     linear_end: 0.0195
     num_timesteps_cond: 1
@@ -25,7 +25,7 @@ model:
       params:
         ndf: 32
         nc: 3
-        ckpt_path: "./pretrained/FH_best_11.pth"
+        ckpt_path: "./pretrained/FH_best_55.pth"
 
     unet_config:
       target: ldm.modules.diffusionmodules.openaimodel.UNetModel
