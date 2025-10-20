@@ -200,14 +200,68 @@ class CrossAttention(nn.Module):
 
     def forward(self, x, context=None, mask=None, saliency_map=None, saliency_weight=None):
         h = self.heads
-
+        b, c, *spatial = x.shape
         q = self.to_q(x)
         context = default(context, x)
         k = self.to_k(context)
         v = self.to_v(context)
 
-        q, k, v = map(lambda t: rearrange(t, 'b n (h d) -> (b h) n d', h=h), (q, k, v))
+        if saliency_map is not None:
+            # x shape이 (b, n, c) (1, 1024, 320)임을 확인
+            b = x.shape[0]
+            n_seq = x.shape[1] # 1. 시퀀스 길이(1024)를 가져옵니다. (n = x.shape[2] -> n_seq = x.shape[1])
+            
+            if saliency_map.dim() == 2:
+                saliency_map = saliency_map.unsqueeze(0).unsqueeze(0)
+                saliency_map = saliency_map.expand(b, -1, -1, -1)
+            # saliency_map shape: (b, 1, H, W) -> (1, 1, 256, 256)
+            #print(f"Saliency map shape before processing: {saliency_map.shape}")
+            
+            # 2. 2D Saliency map을 1D로 flatten합니다.
+            saliency_map_flat = saliency_map.view(b, 1, -1)
+            # saliency_map_flat shape: (b, 1, H*W) -> (1, 1, 65536)
+            #print(f"Saliency map shape after flattening: {saliency_map_flat.shape}")
+            
+            # 3. 1D 'linear' 모드를 사용해 시퀀스 길이 n_seq에 맞게 리사이징합니다.
+            saliency_resized = F.interpolate(saliency_map_flat, size=n_seq, mode="linear", align_corners=False)
+            #print(f"Saliency map shape after resizing: {saliency_resized.shape}")
+            # saliency_resized shape: (b, 1, n_seq) -> (1, 1, 1024)
+            
+            # 4. saliency_factor 계산
+            saliency_flat = saliency_resized 
+            saliency_factor = 1 + saliency_weight * saliency_flat # (b, 1, n_seq)
+            #print(f"Saliency factor shape before expansion: {saliency_factor.shape}")
+            
+            # 2. 'c'(1024) 대신 'h'(self.heads)로 확장합니다.
+            saliency_factor = saliency_factor.expand(b, h, -1) # (b, h, n_seq)
+            #print(f"Saliency factor shape after expansion: {saliency_factor.shape}")
+            # saliency_factor shape: (1, h, 1024)
+            
+            # --- 로직 순서 변경 및 수정 ---
 
+            # 5. q, k, v를 먼저 rearrange합니다.
+            # q, k, v shape: (b, n_seq, c) -> (1, 1024, 320)
+            q, k, v = map(lambda t: rearrange(t, 'b n (h d) -> (b h) n d', h=h), (q, k, v)) 
+            # q, k, v shape: (b*h, n_seq, d) -> (1*h, 1024, 320/h)
+
+            # 6. saliency_factor의 shape을 k, v에 맞게 변경합니다.
+            saliency_factor = rearrange(saliency_factor, 'b h n -> (b h) n')
+            #print(f"Saliency factor shape after rearranging: {saliency_factor.shape}")
+            # saliency_factor shape: (b*h, n_seq) -> (1*h, 1024)
+            
+            saliency_factor = saliency_factor.unsqueeze(-1)
+            #print(f"Saliency factor shape after unsqueezing: {saliency_factor.shape}")
+            # saliency_factor shape: (b*h, n_seq, 1) -> (1*h, 1024, 1)
+            
+            # 7. Saliency factor를 적용합니다.
+            #    k (1*h, 1024, d) * factor (1*h, 1024, 1) -> 브로드캐스팅 성공
+            #print("k shape before saliency modulation:", k.shape)
+            k = k * saliency_factor
+            v = v * saliency_factor
+        else:
+            # Saliency가 없을 경우
+            q, k, v = map(lambda t: rearrange(t, 'b n (h d) -> (b h) n d', h=h), (q, k, v))
+        
         sim = einsum('b i d, b j d -> b i j', q, k) * self.scale
 
         if exists(mask):
@@ -218,29 +272,6 @@ class CrossAttention(nn.Module):
 
         # attention, what we cannot get enough of
         attn = sim.softmax(dim=-1)
-        #print("-----")
-        # Apply saliency map modulation only for self-attention (when context is None or same as x)
-        #print("Here1")
-        if saliency_map is not None and saliency_weight is not None:
-            # For self-attention, apply saliency modulation
-            b_orig = x.shape[0]
-            seq_len = x.shape[1]
-            #print("saliency map applied")
-            
-            # Reshape saliency_map to match attention dimensions
-            if len(saliency_map.shape) == 4:  # [N, 1, H, W]
-                h_dim = int(seq_len ** 0.5)  # Assuming square spatial dimensions
-                w_dim = seq_len // h_dim
-                saliency_resized = torch.nn.functional.interpolate(
-                    saliency_map, size=(h_dim, w_dim), mode='bilinear', align_corners=False)
-                saliency_flat = saliency_resized.reshape(b_orig, -1)  # [N, H*W]
-                
-                # Expand for each head: [N, H*W] -> [N*heads, H*W, H*W]
-                saliency_expanded = saliency_flat.unsqueeze(-1).expand(-1, -1, seq_len)  # [N, H*W, H*W]
-                saliency_expanded = saliency_expanded.repeat(h, 1, 1)  # [N*heads, H*W, H*W]
-                
-                # Apply modulation to attention weights
-                attn = attn * (1.0 + saliency_weight * saliency_expanded)
 
         out = einsum('b i j, b j d -> b i d', attn, v)
         out = rearrange(out, '(b h) n d -> b n (h d)', h=h)
