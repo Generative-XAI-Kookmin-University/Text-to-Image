@@ -210,13 +210,13 @@ class CrossAttention(nn.Module):
             # x shape이 (b, n, c) (1, 1024, 320)임을 확인
             b = x.shape[0]
             n_seq = x.shape[1] # 1. 시퀀스 길이(1024)를 가져옵니다. (n = x.shape[2] -> n_seq = x.shape[1])
-            
+
             if saliency_map.dim() == 2:
                 saliency_map = saliency_map.unsqueeze(0).unsqueeze(0)
                 saliency_map = saliency_map.expand(b, -1, -1, -1)
             # saliency_map shape: (b, 1, H, W) -> (1, 1, 256, 256)
             #print(f"Saliency map shape before processing: {saliency_map.shape}")
-            
+       
             # 2. 2D Saliency map을 1D로 flatten합니다.
             saliency_map_flat = saliency_map.view(b, 1, -1)
             # saliency_map_flat shape: (b, 1, H*W) -> (1, 1, 65536)
@@ -406,6 +406,14 @@ class SpatialTransformer(nn.Module):
             self.proj_out = zero_module(nn.Linear(in_channels, inner_dim))
         self.use_linear = use_linear
 
+        self.fam_proj = nn.Sequential(
+            nn.Conv2d(1, 8, kernel_size=3, padding=1),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(8, 8, kernel_size=3, padding=1),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(8, 1, kernel_size=1),
+        )
+
     def forward(self, x, context=None, saliency_map=None, saliency_weight=None):
         # note: if no context is given, cross-attention defaults to self-attention
         if not isinstance(context, list):
@@ -419,8 +427,23 @@ class SpatialTransformer(nn.Module):
         x = rearrange(x, 'b c h w -> b (h w) c').contiguous()
         if self.use_linear:
             x = self.proj_in(x)
+
+        fam_proc = None
+        
+        if saliency_map is not None:
+            fam = saliency_map
+            if fam.dim() == 2:
+                fam = fam.unsqueeze(0).unsqueeze(0)
+                fam = fam.repeat(b, 1, 1, 1)
+            elif fam.dim() == 3:
+                fam = fam.unsqueeze(1)
+            elif fam.dim() == 4 and fam.shape[1] != 1:
+                fam = fam.mean(dim=1, keepdim=True)
+
+            fam_proc = self.fam_proj(fam.to(dtype=x.dtype, device=x.device))
+
         for i, block in enumerate(self.transformer_blocks):
-            x = block(x, context=context[i], saliency_map=saliency_map, saliency_weight=saliency_weight)
+            x = block(x, context=context[i], saliency_map=fam_proc, saliency_weight=saliency_weight)
         if self.use_linear:
             x = self.proj_out(x)
         x = rearrange(x, 'b (h w) c -> b c h w', h=h, w=w).contiguous()
