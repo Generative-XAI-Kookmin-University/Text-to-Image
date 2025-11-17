@@ -409,6 +409,12 @@ class SpatialTransformer(nn.Module):
         self.fam_proj = nn.Sequential(
             nn.Conv2d(1, 8, kernel_size=3, padding=1),
             nn.ReLU(inplace=True),
+            nn.Conv2d(8, 16, kernel_size=3, padding=1),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(16, 16, kernel_size=3, padding=1),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(16, 8, kernel_size=3, padding=1),
+            nn.ReLU(inplace=True),
             nn.Conv2d(8, 8, kernel_size=3, padding=1),
             nn.ReLU(inplace=True),
             nn.Conv2d(8, 1, kernel_size=1),
